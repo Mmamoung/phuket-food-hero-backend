@@ -25,6 +25,28 @@ const WasteEntrySchema = new mongoose.Schema({
     postedAt: { // วันที่/เวลาที่โพสต์
         type: Date,
         default: Date.now
+    },
+    // NEW: Fields for tracking delivery status
+    isReceived: { // True if a farmer has clicked 'Receive Waste'
+        type: Boolean,
+        default: false
+    },
+    receivedBy: { // Farmer User ID who clicked 'Receive Waste'
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        required: function() { return this.isReceived === true; }
+    },
+    receivedAt: { // Timestamp when farmer clicked 'Receive Waste'
+        type: Date,
+        required: function() { return this.isReceived === true; }
+    },
+    isDelivered: { // True if school has confirmed delivery via QR scan
+        type: Boolean,
+        default: false
+    },
+    deliveredAt: { // Timestamp when delivery was confirmed
+        type: Date,
+        required: function() { return this.isDelivered === true; }
     }
 });
 
