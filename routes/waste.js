@@ -134,11 +134,15 @@ router.post('/receive/:id', protect, authorizeRoles('farmer'), async (req, res) 
         if (!wasteEntry) {
             return res.status(404).json({ msg: 'ไม่พบข้อมูลเศษอาหารที่จะรับ' });
         }
+        if (wasteEntry.isReceived) {
+            return res.status(400).json({ msg: 'เศษอาหารนี้ถูกรับไปแล้ว' });
+        }
 
-        // Optional: Add logic to mark the waste as "received" in the WasteEntry model
-        // e.g., wasteEntry.isReceived = true;
-        // await wasteEntry.save();
-        // Or remove the entry after it's received to prevent double-receiving
+        // Mark the waste as 'received' by this farmer
+        wasteEntry.isReceived = true;
+        wasteEntry.receivedBy = req.user.id;
+        wasteEntry.receivedAt = Date.now();
+        await wasteEntry.save();
 
         // NEW: Update farmer's wasteReceivedCount and stars
         const farmerUser = await User.findById(req.user.id);
@@ -159,13 +163,54 @@ router.post('/receive/:id', protect, authorizeRoles('farmer'), async (req, res) 
     }
 });
 
+// @route   POST /api/waste/confirm-delivery/:id
+// @desc    School confirms delivery of a waste entry via QR scan
+// @access  Private (School only)
+router.post('/confirm-delivery/:id', protect, authorizeRoles('school'), async (req, res) => {
+    try {
+        const wasteEntry = await WasteEntry.findById(req.params.id);
+
+        if (!wasteEntry) {
+            return res.status(404).json({ msg: 'ไม่พบข้อมูลเศษอาหารที่จะยืนยัน' });
+        }
+
+        // Check if the school is the owner of this waste entry
+        if (wasteEntry.school.toString() !== req.user.id) {
+            return res.status(403).json({ msg: 'คุณไม่ได้รับอนุญาตให้ยืนยันการส่งมอบข้อมูลนี้' });
+        }
+
+        // Check if it's already delivered
+        if (wasteEntry.isDelivered) {
+            return res.status(400).json({ msg: 'เศษอาหารนี้ถูกส่งมอบไปแล้ว' });
+        }
+        // Check if it's even received by a farmer
+        if (!wasteEntry.isReceived) {
+            return res.status(400).json({ msg: 'เศษอาหารนี้ยังไม่ถูกเกษตรกรรับไป' });
+        }
+
+        // Mark as delivered
+        wasteEntry.isDelivered = true;
+        wasteEntry.deliveredAt = Date.now();
+        await wasteEntry.save();
+
+        res.json({ msg: 'ยืนยันการส่งมอบเศษอาหารสำเร็จ', wasteEntryId: wasteEntry._id });
+
+    } catch (err) {
+        console.error(err.message);
+        if (err.kind === 'ObjectId' || (err.name === 'CastError' && err.path === '_id')) {
+            return res.status(404).json({ msg: 'ไม่พบข้อมูลเศษอาหาร (รูปแบบ ID ไม่ถูกต้อง)' });
+        }
+        res.status(500).json({ msg: 'Server Error ภายใน' });
+    }
+});
+
 
 // @route   GET /api/waste/posts
 // @desc    Get all waste entries for display (for farmers/schools dashboard)
 // @access  Private (Authenticated users)
 router.get('/posts', protect, async (req, res) => {
     try {
-        const wasteEntries = await WasteEntry.find()
+        const wasteEntries = await WasteEntry.find({ isDelivered: false }) // Only show not yet delivered items
             .populate('school', 'instituteName contactNumber email address')
             .sort({ postedAt: -1 });
 
@@ -177,13 +222,56 @@ router.get('/posts', protect, async (req, res) => {
     }
 });
 
+// @route   GET /api/waste/pending-delivery
+// @desc    Get waste entries pending delivery for a specific school
+// @access  Private (School only)
+router.get('/pending-delivery', protect, authorizeRoles('school'), async (req, res) => {
+    try {
+        const schoolId = req.user.id;
+        const pendingEntries = await WasteEntry.find({
+            school: schoolId,
+            isReceived: true, // Has been 'received' by a farmer
+            isDelivered: false // But not yet 'delivered' by school
+        })
+        .populate('receivedBy', 'name contactNumber email') // Populate farmer details
+        .sort({ receivedAt: -1 });
+
+        res.json(pendingEntries);
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('Server Error');
+    }
+});
+
+// @route   GET /api/waste/received-history
+// @desc    Get farmer's received waste history
+// @access  Private (Farmer only)
+router.get('/received-history', protect, authorizeRoles('farmer'), async (req, res) => {
+    try {
+        const farmerId = req.user.id;
+        const receivedEntries = await WasteEntry.find({
+            receivedBy: farmerId,
+            isReceived: true // Items this farmer received
+        })
+        .populate('school', 'instituteName contactNumber email address')
+        .sort({ receivedAt: -1 });
+
+        res.json(receivedEntries);
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('Server Error');
+    }
+});
+
+
 // @route   GET /api/waste/posts/:id
 // @desc    Get single waste entry by ID (for details page)
 // @access  Private (Authenticated users)
 router.get('/posts/:id', protect, async (req, res) => {
     try {
         const wasteEntry = await WasteEntry.findById(req.params.id)
-            .populate('school', 'instituteName contactNumber email address');
+            .populate('school', 'instituteName contactNumber email address')
+            .populate('receivedBy', 'name contactNumber email'); // Also populate farmer info if exists
 
         if (!wasteEntry) {
             return res.status(404).json({ msg: 'ไม่พบข้อมูลเศษอาหาร' });
@@ -193,6 +281,7 @@ router.get('/posts/:id', protect, async (req, res) => {
 
     } catch (err) {
         console.error(err.message);
+        // If ID format is invalid
         if (err.kind === 'ObjectId') {
             return res.status(404).json({ msg: 'ไม่พบข้อมูลเศษอาหาร' });
         }
@@ -241,7 +330,9 @@ router.get('/analyze', protect, authorizeRoles('school'), async (req, res) => {
 router.get('/filter', protect, authorizeRoles('farmer'), async (req, res) => {
     const { weightMin, weightMax, menu, date, schoolName } = req.query; // Get query parameters
 
-    const query = {};
+    const query = {
+        isDelivered: false // Farmers only see items not yet delivered
+    };
 
     // Filter by weight
     if (weightMin || weightMax) {
